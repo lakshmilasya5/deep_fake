@@ -2,8 +2,6 @@ gradio
 tensorflow
 opencv-python
 numpy
-gunicorn
 keras
-Pillow
-werkzeug
+
 
