@@ -1,85 +1,69 @@
 import os
-import logging
-from flask import Flask, render_template, request
-from werkzeug.utils import secure_filename
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logs
+
+import gradio as gr
 import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
+import tensorflow as tf
 import cv2
+from PIL import Image
+from pathlib import Path
 
-# Suppress TensorFlow logs (info, warning)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-# Set up basic logging
-logging.basicConfig(level=logging.INFO)
-
-app = Flask(__name__)
-
-# Upload folder config
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB file limit
-
+# Load model
+model = tf.keras.models.load_model("deepfake_model.h5")
 IMG_SIZE = 128
-model = load_model('deepfake_model.h5')  # Load once
 
-# Create upload directory if it doesn't exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+def predict_image(image_path):
+    img = Image.open(image_path)
+    img = img.resize((IMG_SIZE, IMG_SIZE))
+    img_array = np.array(img) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+    pred = model.predict(img_array, verbose=0)[0][0]
+    return "Fake" if pred <= 0.5 else "Real"
 
-def predict_image(filepath):
-    try:
-        img = image.load_img(filepath, target_size=(IMG_SIZE, IMG_SIZE))
-        img_array = image.img_to_array(img) / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
-        pred = model.predict(img_array)[0][0]
-        return "Fake" if pred <= 0.5 else "Real"
-    except Exception as e:
-        logging.error(f"Error in image prediction: {e}")
-        return "Error in image prediction"
+def predict_video(video_path):
+    cap = cv2.VideoCapture(video_path)
+    fake_votes = 0
+    total_frames = 0
+    
+    while total_frames < 20:  # Process max 20 frames
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        frame = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = frame.astype("float32") / 255.0
+        frame = np.expand_dims(frame, axis=0)
+        
+        pred = model.predict(frame, verbose=0)[0][0]
+        if pred <= 0.5:
+            fake_votes += 1
+        total_frames += 1
+    
+    cap.release()
+    return "Fake" if (fake_votes / total_frames) > 0.5 else "Real"
 
-def predict_video(filepath):
-    try:
-        cap = cv2.VideoCapture(filepath)
-        frame_count = 0
-        fake_votes = 0
-        total_frames = 0
+def process_file(file_path):
+    if not file_path:
+        return "No file uploaded"
+    
+    file_path = str(file_path)
+    ext = Path(file_path).suffix.lower()
+    
+    if ext in ['.jpg', '.jpeg', '.png']:
+        return predict_image(file_path)
+    elif ext in ['.mp4', '.avi', '.mov']:
+        return predict_video(file_path)
+    else:
+        return "Unsupported file type"
 
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame_count >= 10:  # Reduced to 10 frames
-                break
-            frame = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
-            frame = frame.astype("float32") / 255.0
-            frame = np.expand_dims(frame, axis=0)
-            pred = model.predict(frame)[0][0]
-            if pred >= 0.5:
-                fake_votes += 1
-            total_frames += 1
-            frame_count += 1
+# Simple interface
+interface = gr.Interface(
+    fn=process_file,
+    inputs=gr.File(label="Upload Image or Video", file_types=["image", "video"]),
+    outputs="text",
+    title="Deepfake Detection",
+    description="Upload an image or video to check if it's real or fake"
+)
 
-        cap.release()
-        return "Fake" if fake_votes > total_frames / 2 else "Real"
-    except Exception as e:
-        logging.error(f"Error in video prediction: {e}")
-        return "Error in video prediction"
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    result = None
-    if request.method == 'POST':
-        file = request.files.get('file')
-        if file:
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-
-            if filename.lower().endswith(('.mp4', '.avi', '.mov')):
-                result = predict_video(filepath)
-            elif filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-                result = predict_image(filepath)
-            else:
-                result = "Unsupported file format"
-
-    return render_template('index.html', result=result)
-
-if __name__ == '__main__':
-    app.run()
+interface.launch()
