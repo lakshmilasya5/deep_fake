@@ -1,69 +1,68 @@
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logs
-
-import gradio as gr
+from flask import Flask, render_template, request
+from werkzeug.utils import secure_filename
 import numpy as np
-import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
 import cv2
-from PIL import Image
-from pathlib import Path
 
-# Load model
-model = tf.keras.models.load_model("deepfake_model.h5")
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+
 IMG_SIZE = 128
+model = load_model('deepfake_model.h5')
 
-def predict_image(image_path):
-    img = Image.open(image_path)
-    img = img.resize((IMG_SIZE, IMG_SIZE))
-    img_array = np.array(img) / 255.0
+# Make sure upload folder exists
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+def predict_image(filepath):
+    img = image.load_img(filepath, target_size=(IMG_SIZE, IMG_SIZE))
+    img_array = image.img_to_array(img) / 255.0
     img_array = np.expand_dims(img_array, axis=0)
-    pred = model.predict(img_array, verbose=0)[0][0]
+    pred = model.predict(img_array)[0][0]
     return "Fake" if pred <= 0.5 else "Real"
 
-def predict_video(video_path):
-    cap = cv2.VideoCapture(video_path)
+def predict_video(filepath):
+    cap = cv2.VideoCapture(filepath)
+    frame_count = 0
     fake_votes = 0
     total_frames = 0
-    
-    while total_frames < 20:  # Process max 20 frames
+
+    while True:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame_count >= 20:  # Analyze only 20 frames
             break
-            
         frame = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame = frame.astype("float32") / 255.0
         frame = np.expand_dims(frame, axis=0)
-        
-        pred = model.predict(frame, verbose=0)[0][0]
-        if pred <= 0.5:
+        pred = model.predict(frame)[0][0]
+        if pred >= 0.5:
             fake_votes += 1
         total_frames += 1
-    
+        frame_count += 1
+
     cap.release()
-    return "Fake" if (fake_votes / total_frames) > 0.5 else "Real"
+    return "Fake" if fake_votes > total_frames / 2 else "Real"
 
-def process_file(file_path):
-    if not file_path:
-        return "No file uploaded"
-    
-    file_path = str(file_path)
-    ext = Path(file_path).suffix.lower()
-    
-    if ext in ['.jpg', '.jpeg', '.png']:
-        return predict_image(file_path)
-    elif ext in ['.mp4', '.avi', '.mov']:
-        return predict_video(file_path)
-    else:
-        return "Unsupported file type"
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    result = None
+    if request.method == 'POST':
+        file = request.files['file']
+        if file:
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
 
-# Simple interface
-interface = gr.Interface(
-    fn=process_file,
-    inputs=gr.File(label="Upload Image or Video", file_types=["image", "video"]),
-    outputs="text",
-    title="Deepfake Detection",
-    description="Upload an image or video to check if it's real or fake"
-)
+            if filename.lower().endswith(('.mp4', '.avi', '.mov')):
+                result = predict_video(filepath)
+            elif filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                result = predict_image(filepath)
+            else:
+                result = "Unsupported file format"
 
-interface.launch()
+    return render_template('index.html', result=result)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+   
